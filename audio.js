@@ -5,6 +5,8 @@ export class AudioSubsystem {
     this.audioElement = null;
     this.sourceNode = null;
     this.dataArray = null;
+    this._iosAbortController = null;
+    this._nextPlayTime = 0;
     
     // Extracted features
     this.energy = 0;
@@ -72,12 +74,14 @@ export class AudioSubsystem {
 
     this.audioElement.addEventListener('ended', () => {
       this.isPlaying = false;
+      this._stopIOSAnalyser();
     });
     this.audioElement.addEventListener('play', () => {
       this.isPlaying = true;
     });
     this.audioElement.addEventListener('pause', () => {
       this.isPlaying = false;
+      this._stopIOSAnalyser();
     });
   }
 
@@ -94,6 +98,7 @@ export class AudioSubsystem {
 
   async playUrl(url) {
     this.init();
+    this._stopIOSAnalyser();
     this.audioElement.src = url;
     if (this.context.state === 'suspended') {
       await this.context.resume();
@@ -108,6 +113,76 @@ export class AudioSubsystem {
     // through the Web Audio analyser. Detect this after a short delay and
     // fall back to a fetch-based analyser source.
     setTimeout(() => this._checkAndFixIOSAnalyser(url), 2000);
+  }
+
+  _stopIOSAnalyser() {
+    if (this._iosAbortController) {
+      this._iosAbortController.abort();
+      this._iosAbortController = null;
+    }
+  }
+
+  _getMP3FrameSize(headerBytes) {
+    if (headerBytes[0] !== 0xFF || (headerBytes[1] & 0xE0) !== 0xE0) return null;
+    
+    const versionIdx = (headerBytes[1] & 0x18) >> 3;
+    const layerIdx = (headerBytes[1] & 0x06) >> 1;
+    
+    if (layerIdx !== 1) return null; // We only support Layer III (index 1)
+    
+    let version;
+    if (versionIdx === 3) version = 1;      // MPEG 1
+    else if (versionIdx === 2) version = 2; // MPEG 2
+    else if (versionIdx === 0) version = 2.5; // MPEG 2.5
+    else return null; // Reserved
+    
+    const bitrateIdx = (headerBytes[2] & 0xF0) >> 4;
+    const sampleRateIdx = (headerBytes[2] & 0x0C) >> 2;
+    const padding = (headerBytes[2] & 0x02) >> 1;
+    
+    if (bitrateIdx === 0 || bitrateIdx === 15 || sampleRateIdx === 3) return null;
+    
+    let bitrate;
+    if (version === 1) {
+      const v1Bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+      bitrate = v1Bitrates[bitrateIdx] * 1000;
+    } else {
+      const v2Bitrates = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+      bitrate = v2Bitrates[bitrateIdx] * 1000;
+    }
+    
+    let sampleRate;
+    if (version === 1) {
+      const v1SampleRates = [44100, 48000, 32000];
+      sampleRate = v1SampleRates[sampleRateIdx];
+    } else if (version === 2) {
+      const v2SampleRates = [22050, 24000, 16000];
+      sampleRate = v2SampleRates[sampleRateIdx];
+    } else {
+      const v25SampleRates = [11025, 12000, 8000];
+      sampleRate = v25SampleRates[sampleRateIdx];
+    }
+    
+    const coef = version === 1 ? 144 : 72;
+    return Math.floor(coef * bitrate / sampleRate) + padding;
+  }
+
+  _findNextFrame(data, startOffset) {
+    const len = data.length;
+    for (let i = startOffset; i < len - 4; i++) {
+      if (data[i] === 0xFF && (data[i+1] & 0xE0) === 0xE0) {
+        const frameSize = this._getMP3FrameSize(data.subarray(i, i + 4));
+        if (frameSize && frameSize > 0) {
+          if (i + frameSize < len) {
+            const nextIdx = i + frameSize;
+            if (data[nextIdx] === 0xFF && (data[nextIdx+1] & 0xE0) === 0xE0) {
+              return { offset: i, size: frameSize };
+            }
+          }
+        }
+      }
+    }
+    return null;
   }
 
   async _checkAndFixIOSAnalyser(url) {
@@ -126,41 +201,86 @@ export class AudioSubsystem {
       // Route the audio element directly to speakers instead
       this.sourceNode.connect(this.context.destination);
 
-      const response = await fetch(url);
+      this._iosAbortController = new AbortController();
+      const signal = this._iosAbortController.signal;
+
+      const response = await fetch(url, { signal });
       const reader = response.body.getReader();
-      const chunks = [];
-      let totalLength = 0;
-      const CHUNK_DECODE_SIZE = 256 * 1024; // decode in 256KB batches
 
-      const pump = async () => {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-          totalLength += value.byteLength;
+      let bufferedData = new Uint8Array(0);
+      this._nextPlayTime = this.context.currentTime;
 
-          if (totalLength >= CHUNK_DECODE_SIZE) {
-            const merged = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
-            chunks.length = 0;
-            totalLength = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Append read bytes
+        const newBuf = new Uint8Array(bufferedData.length + value.length);
+        newBuf.set(bufferedData);
+        newBuf.set(value, bufferedData.length);
+        bufferedData = newBuf;
+
+        // Process only if we have accumulated at least 24KB (~1.5s of 128kbps)
+        // to avoid decoding too frequently and hitting overhead
+        if (bufferedData.length >= 24000) {
+          let offset = 0;
+          let firstFrameOffset = -1;
+          let lastValidOffset = 0;
+
+          while (true) {
+            const frame = this._findNextFrame(bufferedData, offset);
+            if (!frame) break;
+            
+            if (firstFrameOffset === -1) {
+              firstFrameOffset = frame.offset;
+            }
+            offset = frame.offset + frame.size;
+            lastValidOffset = offset;
+          }
+
+          if (firstFrameOffset !== -1 && lastValidOffset > firstFrameOffset) {
+            const decodeBuffer = bufferedData.subarray(firstFrameOffset, lastValidOffset);
+            bufferedData = bufferedData.slice(lastValidOffset);
 
             try {
-              const audioBuffer = await this.context.decodeAudioData(merged.buffer.slice(0));
+              // Copy the array buffer before passing it to decodeAudioData
+              const bufferCopy = decodeBuffer.buffer.slice(decodeBuffer.byteOffset, decodeBuffer.byteOffset + decodeBuffer.byteLength);
+              const audioBuffer = await this.context.decodeAudioData(bufferCopy);
+              
+              if (!this.isPlaying) break;
+
               const src = this.context.createBufferSource();
               src.buffer = audioBuffer;
-              // Connect to analyser only — NOT to destination (no audio output)
               src.connect(this.analyser);
-              src.start();
-              src.onended = () => src.disconnect();
-            } catch (_) { /* skip undecodable chunks */ }
+
+              let playTime = this._nextPlayTime;
+              const now = this.context.currentTime;
+
+              if (playTime < now) {
+                playTime = now;
+              }
+
+              src.start(playTime);
+              this._nextPlayTime = playTime + audioBuffer.duration;
+              
+              src.onended = () => {
+                src.disconnect();
+              };
+            } catch (err) {
+              console.warn('iOS analyser decode failed for chunk, skipping:', err);
+            }
+          } else if (bufferedData.length > 100000) {
+            // Safety fallback: if we have 100KB without any valid frames, discard to prevent memory leaks
+            bufferedData = new Uint8Array(0);
           }
         }
-      };
-      pump();
+      }
     } catch (e) {
-      console.error('iOS fetch-based analyser fallback failed:', e);
+      if (e.name === 'AbortError') {
+        console.log('iOS analyser fetch stream successfully aborted.');
+      } else {
+        console.error('iOS fetch-based analyser fallback failed:', e);
+      }
     }
   }
 
