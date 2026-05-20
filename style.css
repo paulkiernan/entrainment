@@ -182,8 +182,14 @@ input[type="range"]:hover::-webkit-slider-thumb {
   font-weight: 300;
   letter-spacing: 0.04em;
   color: rgba(0, 0, 0, 0.4);
-  line-height: 1;
+  line-height: 1.2;
   transition: opacity 0.8s ease;
+
+  /* Prevent collision with corner UI on narrow screens */
+  max-width: calc(100vw - 200px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Corner UI: mute, what's this, dev */

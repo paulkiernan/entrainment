@@ -162,6 +162,7 @@ async function fetchNowPlaying() {
       nowPlayingEl.style.opacity = '0';
       setTimeout(() => {
         nowPlayingText.textContent = label;
+        nowPlayingText.title = label;
         nowPlayingEl.classList.remove('hidden');
         nowPlayingEl.style.opacity = '';
       }, 400);

@@ -8,6 +8,11 @@ export class AudioSubsystem {
     this._iosAbortController = null;
     this._nextPlayTime = 0;
     
+    // iOS Workaround Tracking
+    this._iosWorkaroundActive = false;
+    this._silentFrames = 0;
+    this._currentUrl = '';
+
     // Extracted features
     this.energy = 0;
     this.bass = 0;
@@ -99,6 +104,12 @@ export class AudioSubsystem {
   async playUrl(url) {
     this.init();
     this._stopIOSAnalyser();
+    
+    // Reset iOS workaround state
+    this._iosWorkaroundActive = false;
+    this._silentFrames = 0;
+    this._currentUrl = url;
+
     this.audioElement.src = url;
     if (this.context.state === 'suspended') {
       await this.context.resume();
@@ -108,11 +119,6 @@ export class AudioSubsystem {
     } catch (e) {
       console.error('Audio play failed:', e);
     }
-
-    // On iOS, createMediaElementSource often doesn't pipe streaming audio
-    // through the Web Audio analyser. Detect this after a short delay and
-    // fall back to a fetch-based analyser source.
-    setTimeout(() => this._checkAndFixIOSAnalyser(url), 2000);
   }
 
   _stopIOSAnalyser() {
@@ -120,6 +126,8 @@ export class AudioSubsystem {
       this._iosAbortController.abort();
       this._iosAbortController = null;
     }
+    this._iosWorkaroundActive = false;
+    this._silentFrames = 0;
   }
 
   _getMP3FrameSize(headerBytes) {
@@ -186,18 +194,14 @@ export class AudioSubsystem {
   }
 
   async _checkAndFixIOSAnalyser(url) {
-    if (!this.analyser || !this.isPlaying) return;
-    this.analyser.getByteFrequencyData(this.dataArray);
-    const sum = this.dataArray.reduce((a, b) => a + b, 0);
-    if (sum > 0) return; // analyser is working fine
+    if (this._iosWorkaroundActive) return;
+    this._iosWorkaroundActive = true;
 
-    // Analyser is silent — iOS createMediaElementSource doesn't pipe streaming
-    // audio through the Web Audio graph. Reroute: audio element plays directly
-    // to speakers, fetch-based stream feeds the analyser for visualization only.
     console.warn('iOS analyser silent — switching to fetch-based analyser source');
     try {
       // Disconnect analyser from speakers so decoded viz data doesn't double-play
       this.analyser.disconnect(this.context.destination);
+      
       // Route the audio element directly to speakers instead
       this.sourceNode.connect(this.context.destination);
 
@@ -245,10 +249,11 @@ export class AudioSubsystem {
             try {
               // Copy the array buffer before passing it to decodeAudioData
               const bufferCopy = decodeBuffer.buffer.slice(decodeBuffer.byteOffset, decodeBuffer.byteOffset + decodeBuffer.byteLength);
-              const audioBuffer = await this.context.decodeAudioData(bufferCopy);
               
               if (!this.isPlaying) break;
 
+              const audioBuffer = await this.context.decodeAudioData(bufferCopy);
+              
               const src = this.context.createBufferSource();
               src.buffer = audioBuffer;
               src.connect(this.analyser);
@@ -295,10 +300,25 @@ export class AudioSubsystem {
   update() {
     if (!this.analyser || !this.isPlaying) {
       this._decayValues();
+      this._silentFrames = 0;
       return;
     }
 
     this.analyser.getByteFrequencyData(this.dataArray);
+    
+    // Dynamic iOS silent analyser detection (resolves buffering delay race conditions)
+    const sum = this.dataArray.reduce((a, b) => a + b, 0);
+    if (sum === 0) {
+      if (!this._iosWorkaroundActive) {
+        this._silentFrames++;
+        if (this._silentFrames > 90) { // ~1.5s of silent frames during active play
+          this._silentFrames = 0;
+          this._checkAndFixIOSAnalyser(this._currentUrl);
+        }
+      }
+    } else {
+      this._silentFrames = 0;
+    }
     
     // === BASS (0-10 bins, ~0-860Hz) — raw energy, used for scatter/wander ===
     let b = 0;
