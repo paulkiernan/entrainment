@@ -208,7 +208,11 @@ export class AudioSubsystem {
       this._iosAbortController = new AbortController();
       const signal = this._iosAbortController.signal;
 
-      const response = await fetch(url, { signal });
+      let fetchUrl = url;
+      if (url === '/stream') {
+        fetchUrl = '/stream-raw';
+      }
+      const response = await fetch(fetchUrl, { signal });
       const reader = response.body.getReader();
 
       let bufferedData = new Uint8Array(0);
