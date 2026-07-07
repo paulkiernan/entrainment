@@ -1,13 +1,13 @@
 {
-  "name": "swarmphony",
+  "name": "entrainment",
   "version": "1.0.0",
   "description": "Audio-reactive 3D boid murmuration visualization",
   "type": "module",
-  "main": "dist/swarmphony.js",
-  "module": "dist/swarmphony.js",
+  "main": "dist/entrainment.js",
+  "module": "dist/entrainment.js",
   "exports": {
     ".": {
-      "import": "./dist/swarmphony.js"
+      "import": "./dist/entrainment.js"
     }
   },
   "files": [

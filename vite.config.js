@@ -8,8 +8,8 @@ export default defineConfig(({ mode }) => {
       ? {
           lib: {
             entry: 'lib/index.js',
-            name: 'Swarmphony',
-            fileName: 'swarmphony',
+            name: 'Entrainment',
+            fileName: 'entrainment',
             formats: ['es'],
           },
           rollupOptions: {
