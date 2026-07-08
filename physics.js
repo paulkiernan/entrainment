@@ -41,6 +41,7 @@ uniform float cohesionForce;
 uniform float maxSpeedBase;
 uniform float audioKick;
 uniform float kickForce;
+uniform float worldScale;
 
 const float PI = 3.141592653589793;
 
@@ -84,8 +85,9 @@ void main() {
     float speed = length(selfVelocity);
     vec3 selfDir = speed > 0.001 ? selfVelocity / speed : vec3(0.0, 1.0, 0.0);
 
-    // Dynamic speed based on audio
-    float maxSpeed = maxSpeedBase + audioEnergy * 15.0;
+    // Dynamic speed based on audio — boost scales with the world so small
+    // viewports don't get a disproportionately violent energy response
+    float maxSpeed = maxSpeedBase + audioEnergy * 15.0 * worldScale;
     float cruiseSpeed = maxSpeed * 0.7; // Birds prefer a comfortable cruise
 
     // === TOPOLOGICAL NEIGHBOR SEARCH ===
@@ -219,24 +221,33 @@ void main() {
     vec3 returnDir = -sign(selfPosition) * overshoot3 * overshoot3 * 0.04;
     steer += returnDir;
 
-    // === CURL NOISE WANDER ===
-    vec3 wanderSample = selfPosition * 0.003 + time * 0.15;
-    vec3 wander = curlNoise(wanderSample);
+    // === SMOOTH FLOW-FIELD WANDER ===
+    // Coherent gusts with wavelength proportional to the world size — pushes
+    // sub-flocks around as groups. (hash-based curl noise is white noise:
+    // per-frame jitter that averages to zero under the turn-rate limit.)
+    float ff = 2.4 / boundsX;
+    vec3 fp = selfPosition * ff;
+    float ft = time * 0.35;
+    vec3 wander = vec3(
+        sin(fp.y * 1.7 + ft)        + sin(fp.z * 1.3 - ft * 1.31),
+        sin(fp.z * 1.9 + ft * 1.13) + sin(fp.x * 1.1 - ft * 0.71),
+        sin(fp.x * 1.5 + ft * 0.89) + sin(fp.y * 2.1 - ft * 1.07)
+    ) * 0.5;
     // Moderate turbulence — enough to create sub-flock drift, not chaos
-    float wanderStrength = 5.0 + audioEnergy * 15.0 + audioTreble * 8.0;
+    float wanderStrength = (5.0 + audioEnergy * 15.0 + audioTreble * 8.0) * worldScale;
     steer += wander * wanderStrength;
 
     // === BASS SCATTER EVENT ===
     // Moderate scatter that pushes sub-flocks apart without total fragmentation
     if (audioBass > 0.3) {
         vec3 burstDir = curlNoise(selfPosition * 0.01 + time * 2.0);
-        steer += burstDir * (audioBass - 0.3) * 60.0;
+        steer += burstDir * (audioBass - 0.3) * 60.0 * worldScale;
     }
 
     // === TREBLE SWIRL ===
     if (audioTreble > 0.3) {
         vec3 swirlAxis = normalize(selfPosition + vec3(0.001));
-        vec3 swirlForce = cross(swirlAxis, selfDir) * (audioTreble - 0.3) * 25.0;
+        vec3 swirlForce = cross(swirlAxis, selfDir) * (audioTreble - 0.3) * 25.0 * worldScale;
         steer += swirlForce;
     }
 
@@ -346,6 +357,7 @@ export class PhysicsSubsystem {
         this.velocityUniforms["maxSpeedBase"] = { value: 25.0 };
         this.velocityUniforms["audioKick"] = { value: 0.0 };
         this.velocityUniforms["kickForce"] = { value: 80.0 };
+        this.velocityUniforms["worldScale"] = { value: 1.0 };
 
         this.velocityVariable.wrapS = THREE.RepeatWrapping;
         this.velocityVariable.wrapT = THREE.RepeatWrapping;
@@ -411,13 +423,16 @@ export class PhysicsSubsystem {
         this.velocityUniforms["boundsY"].value = boundsY;
 
         // Scale flocking distances and speeds proportionally to the simulation
-        // area so sub-flock dynamics look similar on any screen size.
-        const scale = Math.max(0.4, boundsX / 600.0);
+        // area so sub-flock dynamics look similar on any screen size. The floor
+        // must stay below the phone-portrait ratio (~0.26) or interaction ranges
+        // outgrow the box and the flock collapses into one hovering blob.
+        const scale = Math.max(0.2, boundsX / 600.0);
         this.velocityUniforms["separationDistance"].value = this._baseParams.separationDistance * scale;
         this.velocityUniforms["alignmentDistance"].value = this._baseParams.alignmentDistance * scale;
         this.velocityUniforms["cohesionDistance"].value = this._baseParams.cohesionDistance * scale;
         this.velocityUniforms["maxSpeedBase"].value = this._baseParams.maxSpeedBase * scale;
         this.velocityUniforms["kickForce"].value = this._baseParams.kickForce * scale;
+        this.velocityUniforms["worldScale"].value = scale;
 
         this.velocityUniforms["audioEnergy"].value = audioFeatures.energy;
         this.velocityUniforms["audioBass"].value = audioFeatures.bass;
