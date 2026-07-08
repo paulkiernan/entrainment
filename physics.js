@@ -163,15 +163,15 @@ void main() {
             sepCount += 1.0;
         }
 
-        // 2. Alignment — only for neighbors in the forward arc
-        if (facing > -0.3) {
+        // 2. Alignment — neighbors in the forward arc and within alignment range
+        if (facing > -0.3 && d < alignmentDistance) {
             vec3 nVel = texture2D(textureVelocity, nearRef[i]).xyz;
             alignVel += nVel;
             alignCount += 1.0;
         }
 
-        // 3. Cohesion — neighbors in view
-        if (facing > -0.3) {
+        // 3. Cohesion — neighbors in view and within cohesion range
+        if (facing > -0.3 && d < cohesionDistance) {
             cohCenter += nPos;
             cohCount += 1.0;
         }

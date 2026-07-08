@@ -22,6 +22,12 @@ tasks:
     cmds:
       - npx vite --open
 
+  dev:lan:
+    desc: Dev server reachable from other devices on the network (for phone testing)
+    deps: [install]
+    cmds:
+      - npx vite --host
+
   build:
     desc: Build the app to dist/ for deployment
     deps: [install]
