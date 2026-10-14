@@ -7,6 +7,12 @@ import { defineConfig } from 'vite';
 // NOTE: '/stream-raw' must come before '/stream' — Vite picks the first
 // matching prefix (unlike nginx's longest-prefix), and '/stream' would
 // otherwise swallow '/stream-raw' requests.
+// SomaFM also 403s requests whose Referer isn't an allowed site (localhost
+// included), so drop it before forwarding.
+const stripReferer = (proxy) => {
+  proxy.on('proxyReq', (proxyReq) => proxyReq.removeHeader('referer'));
+};
+
 const streamProxy = {
   '/stream-raw': {
     target: 'https://ice2.somafm.com',
@@ -17,6 +23,7 @@ const streamProxy = {
     // Mask the content type like production nginx does, so iOS Safari's
     // fetch() gets raw bytes instead of handing off to WebKit's media loader.
     configure: (proxy) => {
+      stripReferer(proxy);
       proxy.on('proxyRes', (proxyRes) => {
         proxyRes.headers['content-type'] = 'application/octet-stream';
       });
@@ -28,6 +35,7 @@ const streamProxy = {
     followRedirects: true,
     headers: { 'User-Agent': 'entrainment/1.0 (+https://paulynomial.com)' },
     rewrite: (path) => '/defcon-128-mp3',
+    configure: stripReferer,
   },
 };
 
