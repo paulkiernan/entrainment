@@ -1,70 +1,99 @@
 import * as THREE from 'three';
-import { AudioSubsystem } from './audio.js?v=4.3.0';
-import { PhysicsSubsystem } from './physics.js?v=4.3.0';
-import { RenderingSubsystem } from './rendering.js?v=4.3.0';
+import { AudioSubsystem } from './audio.js?v=4.4.0';
+import { PhysicsSubsystem, DEFAULT_PARAMS } from './physics.js?v=4.4.0';
+import { RenderingSubsystem } from './rendering.js?v=4.4.0';
 
+// Must match --c-* in style.css
 const COLORS = {
-  energy: '#44cc77',
-  bass:   '#ffcc44',
-  mids:   '#44aaff',
-  treble: '#bb88ff',
-  kick:   '#ff6644',
+  kick:   '#c8553d',
+  bass:   '#b08a2e',
+  mids:   '#3f7cac',
+  treble: '#7d5ba6',
+  energy: '#4a8f6a',
 };
+
+// Audio features plotted in the dev panel. `threshold` marks where the
+// velocity shader switches an effect on (see physics.js).
+const SIGNALS = [
+  { key: 'kick',   label: 'Kick',   drives: 'scatter' },
+  { key: 'bass',   label: 'Bass',   drives: 'separation', threshold: 0.3 },
+  { key: 'mids',   label: 'Mids',   drives: 'alignment' },
+  { key: 'treble', label: 'Treble', drives: 'flutter',    threshold: 0.3 },
+  { key: 'energy', label: 'Energy', drives: 'speed' },
+];
+
+// Dev panel sliders. `live` mirrors the shader's audio modulation so the
+// readout shows what the GPU is actually using this frame.
+const SLIDERS = [
+  { group: 'Neighbor radius', probe: true },
+  { param: 'sepDist',   label: 'Separation', min: 1, max: 100, step: 1 },
+  { param: 'aliDist',   label: 'Alignment',  min: 1, max: 200, step: 1 },
+  { param: 'cohDist',   label: 'Cohesion',   min: 1, max: 200, step: 1 },
+  { group: 'Strength' },
+  { param: 'sepForce',  label: 'Separation', min: 0, max: 100, step: 1,
+    live: (v, f) => v * (1 + f.bass * 2) },
+  { param: 'aliForce',  label: 'Alignment',  min: 0, max: 5, step: 0.05,
+    live: (v, f) => v * (0.3 + f.mids * 3) },
+  { param: 'cohForce',  label: 'Cohesion',   min: 0, max: 20, step: 0.1,
+    live: (v, f) => v * (1 - Math.min(f.energy * 1.5, 0.6) + 0.4) },
+  { group: 'Motion' },
+  { param: 'maxSpeed',  label: 'Max speed',  min: 5, max: 60, step: 1,
+    live: (v, f, scale) => (v + f.energy * 15) * scale },
+  { param: 'kickForce', label: 'Kick force', min: 0, max: 2000, step: 10,
+    live: (v, f, scale) => v * scale * f.kick },
+];
+
+const HISTORY_LEN = 240;
+const PROBE_EVERY = 30; // frames between neighbour-spacing readbacks
 
 let audioSystem;
 let physicsSystem;
 let renderingSystem;
 let clock;
 
-const statusEl = document.getElementById('status');
 const nowPlayingEl = document.getElementById('now-playing');
 const nowPlayingText = document.getElementById('now-playing-text');
-let nowPlayingInterval = null;
 
 let isDevMode = false;
-let spectrogramCanvas, spectrogramCtx;
-let kickCanvas, kickCtx;
-let midsCanvas, midsCtx;
-let trebleCanvas, trebleCtx;
-let energyCanvas, energyCtx;
-let kickHistory = [];
-let midsHistory = [];
-let trebleHistory = [];
-let energyHistory = [];
-const KICK_HISTORY_LEN = 300;
+let streamStarted = false;
+let frame = 0;
+let fps = 60;
+
 const devPanel = document.getElementById('dev-mode-panel');
-const devStats = document.getElementById('dev-stats');
+const devMeta = document.getElementById('dev-meta');
+const audioState = document.getElementById('audio-state');
+const resetBtn = document.getElementById('reset-btn');
+let spectrogram;
+const signalRows = [];
+const sliderRows = [];
+let probeLabel = null;
 
 function init() {
   const canvas = document.getElementById('canvas');
-  spectrogramCanvas = document.getElementById('spectrogram-canvas');
-  spectrogramCtx = spectrogramCanvas.getContext('2d');
-  kickCanvas = document.getElementById('kick-canvas');
-  kickCtx = kickCanvas.getContext('2d');
-  midsCanvas = document.getElementById('mids-canvas');
-  midsCtx = midsCanvas.getContext('2d');
-  trebleCanvas = document.getElementById('treble-canvas');
-  trebleCtx = trebleCanvas.getContext('2d');
-  energyCanvas = document.getElementById('energy-canvas');
-  energyCtx = energyCanvas.getContext('2d');
 
   audioSystem = new AudioSubsystem();
   renderingSystem = new RenderingSubsystem(canvas);
   physicsSystem = new PhysicsSubsystem(renderingSystem.getRenderer());
   clock = new THREE.Clock();
 
+  buildDevPanel();
+
   const devBtn = document.getElementById('dev-btn');
   const whatsThisBtn = document.getElementById('whats-this-btn');
   const whatsThisPanel = document.getElementById('whats-this-panel');
+  const panels = {
+    dev: [devPanel, devBtn],
+    whatsThis: [whatsThisPanel, whatsThisBtn],
+  };
 
   // Single active panel — only one can be open at a time.
-  // Instantly hide both before showing a new one so opacity transitions never overlap.
   let activePanel = null;
 
   function closeAll() {
-    whatsThisPanel.classList.add('hidden');
-    devPanel.classList.add('hidden');
-    devBtn.classList.remove('active');
+    for (const [panel, btn] of Object.values(panels)) {
+      panel.classList.add('hidden');
+      btn.setAttribute('aria-expanded', 'false');
+    }
     isDevMode = false;
     activePanel = null;
   }
@@ -73,12 +102,12 @@ function init() {
     if (activePanel === name) { closeAll(); return; }
     closeAll();
     activePanel = name;
+    const [panel, btn] = panels[name];
+    panel.classList.remove('hidden');
+    btn.setAttribute('aria-expanded', 'true');
     if (name === 'dev') {
       isDevMode = true;
-      devBtn.classList.add('active');
-      devPanel.classList.remove('hidden');
-    } else {
-      whatsThisPanel.classList.remove('hidden');
+      sizeDevCanvases();
     }
   }
 
@@ -100,10 +129,16 @@ function init() {
     }
   });
 
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && activePanel) {
+      const [, btn] = panels[activePanel];
+      closeAll();
+      btn.focus();
+    }
+  });
+
   // Mute / play toggle — clicking the note icon also starts the stream the first time
   const muteBtn = document.getElementById('mute-btn');
-  const muteIcon = document.getElementById('mute-icon');
-  let streamStarted = false;
   muteBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (!streamStarted) {
@@ -113,42 +148,205 @@ function init() {
       audioSystem.playUrl(streamUrl);
       streamStarted = true;
       startNowPlaying();
-      muteIcon.textContent = '\u266A';
+      muteBtn.classList.remove('idle');
     } else {
       const el = audioSystem.audioElement;
       if (!el) return;
       el.muted = !el.muted;
-      muteIcon.textContent = el.muted ? '\uD83D\uDD07' : '\u266A';
     }
+    const muted = audioSystem.audioElement?.muted;
+    muteBtn.classList.toggle('muted', !!muted);
+    const label = muted ? 'Unmute' : 'Mute';
+    muteBtn.title = label;
+    muteBtn.setAttribute('aria-label', label);
   });
 
-  // Sliders
-  const sliders = [
-    { id: 'sl-sep-dist', valId: 'val-sep-dist', param: 'sepDist' },
-    { id: 'sl-ali-dist', valId: 'val-ali-dist', param: 'aliDist' },
-    { id: 'sl-coh-dist', valId: 'val-coh-dist', param: 'cohDist' },
-    { id: 'sl-sep-force', valId: 'val-sep-force', param: 'sepForce' },
-    { id: 'sl-ali-force', valId: 'val-ali-force', param: 'aliForce' },
-    { id: 'sl-coh-force', valId: 'val-coh-force', param: 'cohForce' },
-    { id: 'sl-max-speed', valId: 'val-max-speed', param: 'maxSpeed' },
-    { id: 'sl-kick-force', valId: 'val-kick-force', param: 'kickForce' }
-  ];
-
-  sliders.forEach(s => {
-    const el = document.getElementById(s.id);
-    const valEl = document.getElementById(s.valId);
-    el.addEventListener('input', (e) => {
-      const val = parseFloat(e.target.value);
-      valEl.innerText = val.toFixed(1);
-      const params = {};
-      params[s.param] = val;
-      physicsSystem.updateParams(params);
-    });
-  });
+  window.addEventListener('resize', () => { if (isDevMode) sizeDevCanvases(); });
 
   // Start animation loop
   animate();
 }
+
+// ---------- Dev panel ----------
+
+function el(tag, props = {}, children = []) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
+function formatValue(v, step) {
+  const decimals = step >= 1 ? 0 : step >= 0.1 ? 1 : 2;
+  return v.toFixed(decimals);
+}
+
+function buildDevPanel() {
+  spectrogram = document.getElementById('spectrogram-canvas');
+
+  const signalsEl = document.getElementById('signals');
+  for (const s of SIGNALS) {
+    const canvas = el('canvas');
+    const value = el('span', { className: 'value', textContent: '0.00' });
+    const swatch = el('span', { className: 'swatch' });
+    swatch.style.background = COLORS[s.key];
+    signalsEl.append(el('div', { className: 'signal' }, [
+      el('span', { className: 'name' }, [swatch, s.label, el('small', { textContent: s.drives })]),
+      canvas,
+      value,
+    ]));
+    signalRows.push({ ...s, canvas, value, history: new Float32Array(HISTORY_LEN), head: 0 });
+  }
+
+  const slidersEl = document.getElementById('dev-sliders');
+  for (const s of SLIDERS) {
+    if (s.group) {
+      const group = el('div', { className: 'group', textContent: s.group });
+      if (s.probe) {
+        probeLabel = el('span', { title: 'Median distance of the 7 neighbours each bird actually finds. Radii beyond this change little.' });
+        group.classList.add('with-probe');
+        group.append(probeLabel);
+      }
+      slidersEl.append(group);
+      continue;
+    }
+    const id = `sl-${s.param}`;
+    const def = DEFAULT_PARAMS[s.param];
+    const input = el('input', { type: 'range', id, min: s.min, max: s.max, step: s.step, value: def });
+    input.defaultValue = String(def);
+    const base = el('span');
+    const liveEl = el('span', { className: 'live' });
+    const output = el('output', { htmlFor: id }, [base, liveEl]);
+    const label = el('label', { htmlFor: id, textContent: s.label });
+    const row = { ...s, input, base, liveEl, label };
+
+    input.addEventListener('input', () => {
+      physicsSystem.updateParams({ [s.param]: parseFloat(input.value) });
+      syncSlider(row);
+    });
+
+    slidersEl.append(label, input, output);
+    sliderRows.push(row);
+    syncSlider(row);
+  }
+
+  resetBtn.addEventListener('click', () => {
+    physicsSystem.updateParams(DEFAULT_PARAMS);
+    for (const row of sliderRows) {
+      row.input.value = DEFAULT_PARAMS[row.param];
+      syncSlider(row);
+    }
+  });
+}
+
+function syncSlider(row) {
+  const v = parseFloat(row.input.value);
+  row.base.textContent = formatValue(v, row.step);
+  row.label.classList.toggle('changed', v !== DEFAULT_PARAMS[row.param]);
+  resetBtn.disabled = sliderRows.every(r => parseFloat(r.input.value) === DEFAULT_PARAMS[r.param]);
+}
+
+// Match canvas backing stores to their CSS size so charts stay crisp on HiDPI.
+function sizeDevCanvases() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  for (const canvas of [spectrogram, ...signalRows.map(r => r.canvas)]) {
+    const w = Math.round(canvas.clientWidth * dpr);
+    const h = Math.round(canvas.clientHeight * dpr);
+    if (w && h && (canvas.width !== w || canvas.height !== h)) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+  }
+}
+
+function drawSpectrogram() {
+  const ctx = spectrogram.getContext('2d');
+  const { width: w, height: h } = spectrogram;
+  const data = audioSystem.dataArray;
+  // 128 kbps MP3 has nothing above ~16 kHz (bin 186); log-scale the rows so
+  // the bass and kick region isn't squashed into a few pixels.
+  const maxBin = Math.min(186, data.length - 1);
+
+  ctx.drawImage(spectrogram, -1, 0);
+  const column = ctx.createImageData(1, h);
+  for (let y = 0; y < h; y++) {
+    const frac = 1 - y / (h - 1);
+    const bin = Math.round(Math.exp(frac * Math.log(maxBin + 1))) - 1;
+    const v = Math.pow(data[bin] / 255, 2.2);
+    // Quiet bins wash in as slate blue, loud ones deepen to ink
+    const o = y * 4;
+    column.data[o]     = 63 + (28 - 63) * v;
+    column.data[o + 1] = 124 + (26 - 124) * v;
+    column.data[o + 2] = 172 + (34 - 172) * v;
+    column.data[o + 3] = Math.round(Math.min(1, v * 1.4) * 190);
+  }
+  ctx.clearRect(w - 1, 0, 1, h);
+  ctx.putImageData(column, w - 1, 0);
+}
+
+function drawSignal(row, value) {
+  row.history[row.head] = value;
+  row.head = (row.head + 1) % HISTORY_LEN;
+  row.value.textContent = value.toFixed(2);
+  row.value.style.color = value > 0.3 ? COLORS[row.key] : '';
+
+  const ctx = row.canvas.getContext('2d');
+  const { width: w, height: h } = row.canvas;
+  const pad = 2;
+  const yOf = (v) => h - pad - Math.min(1, Math.max(0, v)) * (h - pad * 2);
+  ctx.clearRect(0, 0, w, h);
+
+  if (row.threshold !== undefined) {
+    ctx.strokeStyle = 'rgba(28, 26, 34, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(0, Math.round(yOf(row.threshold)) + 0.5);
+    ctx.lineTo(w, Math.round(yOf(row.threshold)) + 0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.beginPath();
+  for (let i = 0; i < HISTORY_LEN; i++) {
+    const v = row.history[(row.head + i) % HISTORY_LEN];
+    const x = (i / (HISTORY_LEN - 1)) * w;
+    if (i === 0) ctx.moveTo(x, yOf(v)); else ctx.lineTo(x, yOf(v));
+  }
+  ctx.strokeStyle = COLORS[row.key];
+  ctx.lineWidth = 1.25 * (w / row.canvas.clientWidth || 1);
+  ctx.stroke();
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = COLORS[row.key] + '22';
+  ctx.fill();
+}
+
+function updateDevPanel(features) {
+  devMeta.textContent = `${physicsSystem.boidsCount.toLocaleString()} birds, ${Math.round(fps)} fps`;
+
+  const playing = audioSystem.isPlaying;
+  audioState.textContent = !streamStarted && !playing ? 'waiting for ♪'
+    : audioSystem.audioElement?.muted ? 'muted'
+    : playing ? 'live' : 'connecting…';
+
+  if (audioSystem.analyser) drawSpectrogram();
+  for (const row of signalRows) drawSignal(row, features[row.key]);
+
+  const scale = physicsSystem.worldScale;
+  for (const row of sliderRows) {
+    if (!row.live) continue;
+    const v = row.live(parseFloat(row.input.value), features, scale);
+    row.liveEl.textContent = playing ? ` → ${formatValue(v, row.step)}` : '';
+  }
+
+  if (probeLabel && frame % PROBE_EVERY === 0) {
+    const spacing = physicsSystem.probeNeighborSpacing();
+    probeLabel.textContent = `neighbors found at ≈ ${spacing.toFixed(0)}`;
+  }
+}
+
+// ---------- Now playing ----------
 
 async function fetchNowPlaying() {
   try {
@@ -157,7 +355,7 @@ async function fetchNowPlaying() {
     const data = await res.json();
     const song = data.songs?.[0];
     if (!song) return;
-    const label = `${song.artist} \u2014 ${song.title}`;
+    const label = `${song.artist} — ${song.title}`;
     if (nowPlayingText.textContent !== label) {
       nowPlayingEl.style.opacity = '0';
       setTimeout(() => {
@@ -174,13 +372,17 @@ async function fetchNowPlaying() {
 
 function startNowPlaying() {
   fetchNowPlaying();
-  nowPlayingInterval = setInterval(fetchNowPlaying, 30_000);
+  setInterval(fetchNowPlaying, 30_000);
 }
+
+// ---------- Loop ----------
 
 function animate() {
   requestAnimationFrame(animate);
+  frame++;
 
   const rawDelta = clock.getDelta();
+  if (rawDelta > 0) fps = fps * 0.95 + (1 / rawDelta) * 0.05;
   // Clamp delta: after tab-away rAF pauses and getDelta() returns a huge value,
   // which would teleport all boids. Cap at ~33ms (30fps) for smooth resume.
   const delta = Math.min(rawDelta, 0.033);
@@ -198,199 +400,7 @@ function animate() {
   physicsSystem.update(delta, time, audioFeatures);
   renderingSystem.update(physicsSystem, audioFeatures);
 
-  if (isDevMode && audioSystem.analyser) {
-    drawVisualizer(audioFeatures);
-  }
-}
-
-function drawVisualizer(features) {
-  if (!audioSystem.analyser) return;
-
-  // === SCROLLING SPECTROGRAM ===
-  const data = audioSystem.dataArray;
-  const bufferLength = audioSystem.analyser.frequencyBinCount;
-  const sW = spectrogramCanvas.width;
-  const sH = spectrogramCanvas.height;
-
-  // Shift existing image 1px left
-  const imgData = spectrogramCtx.getImageData(1, 0, sW - 1, sH);
-  spectrogramCtx.putImageData(imgData, 0, 0);
-
-  // Draw new column on the right edge
-  for (let i = 0; i < sH; i++) {
-    // Map canvas row to frequency bin (bottom = low freq, top = high freq)
-    const binIndex = Math.floor((i / sH) * bufferLength);
-    const value = data[binIndex] / 255;
-    // Color: dark bg, bright warm colors for intensity
-    const r = Math.floor(value * 255);
-    const g = Math.floor(value * 100);
-    const b = Math.floor((1 - value) * 80);
-    spectrogramCtx.fillStyle = `rgb(${r},${g},${b})`;
-    spectrogramCtx.fillRect(sW - 1, sH - 1 - i, 1, 1);
-  }
-
-  // === KICK TIMESERIES ===
-  kickHistory.push(audioSystem.kick);
-  if (kickHistory.length > KICK_HISTORY_LEN) kickHistory.shift();
-
-  const kW = kickCanvas.width;
-  const kH = kickCanvas.height;
-  kickCtx.fillStyle = '#1a1a1a';
-  kickCtx.fillRect(0, 0, kW, kH);
-
-  // Draw threshold line
-  kickCtx.strokeStyle = 'rgba(255, 80, 80, 0.4)';
-  kickCtx.setLineDash([4, 4]);
-  kickCtx.beginPath();
-  const threshY = kH - (0.3 * kH); // rough visual threshold
-  kickCtx.moveTo(0, threshY);
-  kickCtx.lineTo(kW, threshY);
-  kickCtx.stroke();
-  kickCtx.setLineDash([]);
-
-  // Draw kick waveform
-  kickCtx.strokeStyle = COLORS.kick;
-  kickCtx.lineWidth = 1.5;
-  kickCtx.beginPath();
-  for (let i = 0; i < kickHistory.length; i++) {
-    const x = (i / KICK_HISTORY_LEN) * kW;
-    const y = kH - (kickHistory[i] * kH);
-    if (i === 0) kickCtx.moveTo(x, y);
-    else kickCtx.lineTo(x, y);
-  }
-  kickCtx.stroke();
-
-  // Fill kicks as bars for emphasis
-  kickCtx.fillStyle = COLORS.kick + '26'; // 15% opacity
-  for (let i = 0; i < kickHistory.length; i++) {
-    if (kickHistory[i] > 0.3) {
-      const x = (i / KICK_HISTORY_LEN) * kW;
-      const barH = kickHistory[i] * kH;
-      kickCtx.fillRect(x - 1, kH - barH, 2, barH);
-    }
-  }
-
-  // === MIDS TIMESERIES ===
-  midsHistory.push(features.mids);
-  if (midsHistory.length > KICK_HISTORY_LEN) midsHistory.shift();
-
-  const mW = midsCanvas.width;
-  const mH = midsCanvas.height;
-  midsCtx.fillStyle = '#1a1a1a';
-  midsCtx.fillRect(0, 0, mW, mH);
-
-  midsCtx.strokeStyle = COLORS.mids;
-  midsCtx.lineWidth = 1.5;
-  midsCtx.beginPath();
-  for (let i = 0; i < midsHistory.length; i++) {
-    const x = (i / KICK_HISTORY_LEN) * mW;
-    const y = mH - (midsHistory[i] * mH);
-    if (i === 0) midsCtx.moveTo(x, y);
-    else midsCtx.lineTo(x, y);
-  }
-  midsCtx.stroke();
-
-  midsCtx.fillStyle = COLORS.mids + '1f'; // 12% opacity
-  midsCtx.beginPath();
-  midsCtx.moveTo(0, mH);
-  for (let i = 0; i < midsHistory.length; i++) {
-    const x = (i / KICK_HISTORY_LEN) * mW;
-    const y = mH - (midsHistory[i] * mH);
-    midsCtx.lineTo(x, y);
-  }
-  midsCtx.lineTo((midsHistory.length / KICK_HISTORY_LEN) * mW, mH);
-  midsCtx.fill();
-
-  // === TREBLE TIMESERIES ===
-  trebleHistory.push(features.treble);
-  if (trebleHistory.length > KICK_HISTORY_LEN) trebleHistory.shift();
-
-  const tW = trebleCanvas.width;
-  const tH = trebleCanvas.height;
-  trebleCtx.fillStyle = '#1a1a1a';
-  trebleCtx.fillRect(0, 0, tW, tH);
-
-  trebleCtx.strokeStyle = COLORS.treble;
-  trebleCtx.lineWidth = 1.5;
-  trebleCtx.beginPath();
-  for (let i = 0; i < trebleHistory.length; i++) {
-    const x = (i / KICK_HISTORY_LEN) * tW;
-    const y = tH - (trebleHistory[i] * tH);
-    if (i === 0) trebleCtx.moveTo(x, y);
-    else trebleCtx.lineTo(x, y);
-  }
-  trebleCtx.stroke();
-
-  trebleCtx.fillStyle = COLORS.treble + '1f'; // 12% opacity
-  trebleCtx.beginPath();
-  trebleCtx.moveTo(0, tH);
-  for (let i = 0; i < trebleHistory.length; i++) {
-    const x = (i / KICK_HISTORY_LEN) * tW;
-    const y = tH - (trebleHistory[i] * tH);
-    trebleCtx.lineTo(x, y);
-  }
-  trebleCtx.lineTo((trebleHistory.length / KICK_HISTORY_LEN) * tW, tH);
-  trebleCtx.fill();
-
-  // === ENERGY TIMESERIES ===
-  energyHistory.push(features.energy);
-  if (energyHistory.length > KICK_HISTORY_LEN) energyHistory.shift();
-
-  const eW = energyCanvas.width;
-  const eH = energyCanvas.height;
-  energyCtx.fillStyle = '#1a1a1a';
-  energyCtx.fillRect(0, 0, eW, eH);
-
-  energyCtx.strokeStyle = COLORS.energy;
-  energyCtx.lineWidth = 1.5;
-  energyCtx.beginPath();
-  for (let i = 0; i < energyHistory.length; i++) {
-    const x = (i / KICK_HISTORY_LEN) * eW;
-    const y = eH - (energyHistory[i] * eH);
-    if (i === 0) energyCtx.moveTo(x, y);
-    else energyCtx.lineTo(x, y);
-  }
-  energyCtx.stroke();
-
-  energyCtx.fillStyle = COLORS.energy + '1f'; // 12% opacity
-  energyCtx.beginPath();
-  energyCtx.moveTo(0, eH);
-  for (let i = 0; i < energyHistory.length; i++) {
-    const x = (i / KICK_HISTORY_LEN) * eW;
-    const y = eH - (energyHistory[i] * eH);
-    energyCtx.lineTo(x, y);
-  }
-  energyCtx.lineTo((energyHistory.length / KICK_HISTORY_LEN) * eW, eH);
-  energyCtx.fill();
-
-  // === LIVE SLIDER VALUES ===
-  // Mirror the shader's audio-modulation formulas so the displayed values
-  // reflect what the GPU is actually using each frame.
-  const sepBase  = parseFloat(document.getElementById('sl-sep-force').value);
-  const aliBase  = parseFloat(document.getElementById('sl-ali-force').value);
-  const cohBase  = parseFloat(document.getElementById('sl-coh-force').value);
-  const spdBase  = parseFloat(document.getElementById('sl-max-speed').value);
-
-  const energyInverse = 1.0 - Math.min(features.energy * 1.5, 0.6);
-  const liveSep   = sepBase * (1.0 + features.bass  * 2.0);
-  const liveAli   = aliBase * (0.3 + features.mids  * 3.0);
-  const liveCoh   = cohBase * (energyInverse + 0.4);
-  const liveSpeed = spdBase + features.energy * 15.0;
-
-  document.getElementById('live-sep-force').textContent = `→ ${liveSep.toFixed(1)}`;
-  document.getElementById('live-ali-force').textContent = `→ ${liveAli.toFixed(1)}`;
-  document.getElementById('live-coh-force').textContent = `→ ${liveCoh.toFixed(1)}`;
-  document.getElementById('live-max-speed').textContent = `→ ${liveSpeed.toFixed(1)}`;
-
-  // === STATS TABLE ===
-  devStats.innerHTML = `<table style="border-collapse:collapse;font-family:monospace;font-size:11px;width:100%">
-    <tr><td style="color:#888">Energy</td><td style="text-align:right;color:${COLORS.energy};font-weight:${features.energy > 0.3 ? 'bold' : 'normal'}">${features.energy.toFixed(3)}</td>
-        <td style="color:#888;padding-left:12px">Bass</td><td style="text-align:right;color:${COLORS.bass};font-weight:${features.bass > 0.3 ? 'bold' : 'normal'}">${features.bass.toFixed(3)}</td></tr>
-    <tr><td style="color:#888">Mids</td><td style="text-align:right;color:${COLORS.mids};font-weight:${features.mids > 0.3 ? 'bold' : 'normal'}">${features.mids.toFixed(3)}</td>
-        <td style="color:#888;padding-left:12px">Treble</td><td style="text-align:right;color:${COLORS.treble};font-weight:${features.treble > 0.3 ? 'bold' : 'normal'}">${features.treble.toFixed(3)}</td></tr>
-    <tr><td style="color:#888">Kick</td><td style="text-align:right;color:${COLORS.kick};font-weight:${features.kick > 0.3 ? 'bold' : 'normal'}">${features.kick.toFixed(3)}</td>
-        <td style="color:#888;padding-left:12px">BOIDs</td><td style="text-align:right">${physicsSystem.boidsCount}</td></tr>
-  </table>`;
+  if (isDevMode) updateDevPanel(audioFeatures);
 }
 
 // Start app

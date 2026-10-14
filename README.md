@@ -24,20 +24,16 @@ The simulation is driven by a live stream from [DEF CON Radio](https://somafm.co
 | Treble | Drives turbulent flutter via curl noise |
 | Energy | Modulates overall speed and turn rate |
 
-Kick detection uses an onset detector on a narrow frequency band (~86–516 Hz) with a lower-mids gate to avoid false triggers from chords and vocals.
+Kick detection uses an onset detector on a narrow frequency band (~0–170 Hz) with a lower-mids gate to avoid false triggers from chords and vocals.
 
 ## Running locally
 
-No build step — it's plain ES modules.
-
 ```bash
-# Any static file server works, e.g.:
-npx serve .
-# or
-python3 -m http.server
+npm install
+npm run dev
 ```
 
-Then open `http://localhost:3000` (or whatever port) and click the music note to start the stream.
+Vite opens the page; click the music note to start the stream. The dev server also proxies `/stream` for iOS, which can't analyse the cross-origin stream directly.
 
 ## Controls
 
@@ -45,14 +41,18 @@ Then open `http://localhost:3000` (or whatever port) and click the music note to
 |---------|-------------|
 | ♪ (bottom right) | Start stream / toggle mute |
 | what's this? | About the project |
-| dev | Toggle dev panel — spectrogram, kick detector graph, and parameter sliders |
+| &lt;/dev&gt; | Flock tuning panel: spectrogram, audio signals, and rule sliders (Esc closes) |
 
-### Dev panel sliders
+### Flock tuning panel
 
-- **Sep/Ali/Coh Dist** — neighbor detection radii for each boid rule
-- **Sep/Ali/Coh Force** — strength of each rule
-- **Max Speed** — top boid velocity
-- **Kick Force** — how violently kicks scatter the flock
+Each audio signal is plotted with the behaviour it drives; dashed lines on bass and treble mark the 0.3 threshold where scatter and swirl switch on.
+
+- **Neighbor radius** (separation / alignment / cohesion): how close a neighbor must be for each rule to apply. The readout beside the heading shows how far away the 7 neighbors each bird actually finds are. Neighbors are drawn from 64 random candidates, not the true nearest, so a radius well above that figure changes nothing.
+- **Strength** (separation / alignment / cohesion): weight of each rule.
+- **Max speed**: top bird velocity.
+- **Kick force**: how hard detected kicks push birds out from their local centre.
+
+The orange value after each strength/motion slider is what the GPU is using this frame, after audio modulation. *Reset* restores the tuned defaults (`DEFAULT_PARAMS` in `physics.js`).
 
 ## Stack
 

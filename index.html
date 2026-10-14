@@ -4,70 +4,59 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>entrainment</title>
-  <meta name="description" content="Ethereal, audio-reactive 3D BOID visualization">
+  <meta name="description" content="A generative starling murmuration that reacts to live radio">
+  <meta name="theme-color" content="#8e9aad">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 18c5-2 8-6 12-6s7 4 12 6c-5-1-8 1-12 1s-7-2-12-1z' fill='%231c1a22'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
   <!-- Bottom-left now playing -->
-  <div id="now-playing" class="hidden">
+  <div id="now-playing" class="hidden" aria-live="polite">
     <span id="now-playing-text"></span>
   </div>
 
   <!-- Bottom-right corner UI -->
   <div id="corner-ui">
-    <!-- Mute toggle -->
-    <button id="mute-btn" title="Toggle mute">
+    <button id="mute-btn" class="idle" title="Play DEF CON Radio" aria-label="Play DEF CON Radio">
       <span id="mute-icon">♪</span>
     </button>
-
-    <!-- What's this? -->
-    <button id="whats-this-btn">what's this?</button>
-
-    <!-- Dev mode -->
-    <button id="dev-btn">&lt;/dev&gt;</button>
+    <button id="whats-this-btn" aria-expanded="false" aria-controls="whats-this-panel">what's this?</button>
+    <button id="dev-btn" aria-expanded="false" aria-controls="dev-mode-panel">&lt;/dev&gt;</button>
   </div>
 
   <!-- What's this popover -->
-  <div id="whats-this-panel" class="hidden">
+  <div id="whats-this-panel" class="popover hidden" role="dialog" aria-label="About entrainment">
     <p>
       <strong><a href="https://github.com/paulkiernan/entrainment" target="_blank" rel="noreferrer">entrainment</a></strong> is a generative murmuration built on the topological neighbor model described by <a href="https://arxiv.org/abs/0709.1916" target="_blank" rel="noreferrer">Ballerini et al. (2008)</a>.
-      Each of the 4,096 birds tracks only its <em>7 nearest neighbors</em>and follows three rules: <em>avoid collisions</em>, <em>align headings</em>, and <em>stay close</em>. The sweeping, organic motion you see emerges entirely from these local interactions.
+      Each of the 4,096 birds tracks only its <em>7 nearest neighbors</em> and follows three rules: <em>avoid collisions</em>, <em>align headings</em>, and <em>stay close</em>. The sweeping, organic motion you see emerges entirely from these local interactions.
     </p>
     <p>
-      The simulation is <strong>audio-reactive</strong>, driven by a live stream from <a href="https://somafm.com/defcon/" target="_blank" rel="noreferrer">DEF CON Radio</a> on SomaFM — click ♪ to start.
-      Bass kicks scatter the flock, mids tighten alignment, and treble sweeps drive turbulent flutter.
+      The simulation is <strong>audio-reactive</strong>, driven by a live stream from <a href="https://somafm.com/defcon/" target="_blank" rel="noreferrer">DEF CON Radio</a> on SomaFM. Click ♪ to start.
+      Kick drums scatter the flock, mids tighten alignment, and treble drives turbulent flutter.
     </p>
   </div>
 
   <!-- Dev mode panel -->
-  <div id="dev-mode-panel" class="hidden">
-    <div style="font-family: monospace; font-size: 10px; color: #999; margin-bottom: 3px;">spectrogram</div>
-    <canvas id="spectrogram-canvas" width="300" height="100"></canvas>
-    <div style="font-family: monospace; font-size: 10px; color: #999; margin-top: 6px; margin-bottom: 3px;">kicks — scatter</div>
-    <canvas id="kick-canvas" width="300" height="60"></canvas>
-    <div style="font-family: monospace; font-size: 10px; color: #999; margin-top: 6px; margin-bottom: 3px;">mids — alignment tightness</div>
-    <canvas id="mids-canvas" width="300" height="60"></canvas>
-    <div style="font-family: monospace; font-size: 10px; color: #999; margin-top: 6px; margin-bottom: 3px;">treble — turbulent flutter</div>
-    <canvas id="treble-canvas" width="300" height="60"></canvas>
-    <div style="font-family: monospace; font-size: 10px; color: #999; margin-top: 6px; margin-bottom: 3px;">energy — speed</div>
-    <canvas id="energy-canvas" width="300" height="60"></canvas>
-    <div id="dev-stats" style="font-family: monospace; font-size: 12px; margin-top: 5px;"></div>
-
-    <div id="dev-sliders" style="margin-top: 10px; display: grid; grid-template-columns: max-content 38px 52px 1fr; gap: 4px 10px; font-size: 11px; align-items: center; font-family: monospace; color: #333;">
-      <span>Separation Dist</span>  <span id="val-sep-dist">20.0</span>  <span></span>                                          <input type="range" id="sl-sep-dist"   min="1"  max="100"  value="20"  step="1">
-      <span>Alignment Dist</span>   <span id="val-ali-dist">136.0</span> <span></span>                                          <input type="range" id="sl-ali-dist"   min="1"  max="200"  value="136" step="1">
-      <span>Cohesion Dist</span>    <span id="val-coh-dist">150.0</span> <span></span>                                          <input type="range" id="sl-coh-dist"   min="1"  max="200"  value="150" step="1">
-      <span>Separation Force</span>     <span id="val-sep-force">25.0</span> <span id="live-sep-force" class="live-val"></span>    <input type="range" id="sl-sep-force"  min="0"  max="100"  value="25"  step="1">
-      <span>Alignment Force</span>      <span id="val-ali-force">3.5</span>  <span id="live-ali-force" class="live-val"></span>    <input type="range" id="sl-ali-force"  min="0"  max="5"    value="3.5" step="0.05">
-      <span>Cohesion Force</span>       <span id="val-coh-force">5.0</span>  <span id="live-coh-force" class="live-val"></span>    <input type="range" id="sl-coh-force"  min="0"  max="20"   value="5"   step="0.1">
-      <span>Max Speed</span>            <span id="val-max-speed">25.0</span> <span id="live-max-speed" class="live-val"></span>    <input type="range" id="sl-max-speed"  min="5"  max="60"   value="25"  step="1">
-      <span>Kick Force</span>           <span id="val-kick-force">80.0</span><span></span>                                          <input type="range" id="sl-kick-force" min="0"  max="2000" value="80"  step="10">
+  <div id="dev-mode-panel" class="popover hidden" role="dialog" aria-label="Flock tuning">
+    <div class="dev-head">
+      <h2>Flock tuning</h2>
+      <span class="meta" id="dev-meta"></span>
     </div>
+
+    <section class="dev-section">
+      <h3>Audio <span class="meta" id="audio-state">waiting for ♪</span></h3>
+      <canvas id="spectrogram-canvas"></canvas>
+      <div id="signals"></div>
+    </section>
+
+    <section class="dev-section" id="dev-sliders-section">
+      <h3>Rules <button class="text-btn" id="reset-btn" disabled>reset</button></h3>
+      <div class="sliders" id="dev-sliders"></div>
+    </section>
   </div>
 
-
   <canvas id="canvas"></canvas>
-  <script type="module" src="main.js?v=4.3.0"></script>
+  <script type="module" src="main.js?v=4.4.0"></script>
 </body>
 </html>

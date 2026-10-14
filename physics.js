@@ -2,7 +2,18 @@ import * as THREE from 'three';
 import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
 
 const WIDTH = 64; // 64x64 = 4096 boids
-const BOUNDS = 800;
+
+// Tuned defaults. Keys match updateParams() and the dev panel sliders.
+export const DEFAULT_PARAMS = {
+    sepDist: 20.0,
+    aliDist: 136.0,
+    cohDist: 150.0,
+    sepForce: 25.0,
+    aliForce: 3.5,
+    cohForce: 5.0,
+    maxSpeed: 25.0,
+    kickForce: 80.0,
+};
 
 const positionShader = `
 uniform float time;
@@ -307,6 +318,7 @@ void main() {
 
 export class PhysicsSubsystem {
     constructor(renderer) {
+        this.renderer = renderer;
         this.gpuCompute = new GPUComputationRenderer(WIDTH, WIDTH, renderer);
         this.boidsCount = WIDTH * WIDTH;
 
@@ -332,32 +344,18 @@ export class PhysicsSubsystem {
         this.velocityUniforms["boundsX"] = { value: 600.0 };
         this.velocityUniforms["boundsY"] = { value: 400.0 };
 
-        // Tuned defaults from user testing — stored as base values so they
-        // can be scaled for smaller viewports while sliders still work.
-        this._baseParams = {
-            separationDistance: 20.0,
-            alignmentDistance: 136.0,
-            cohesionDistance: 150.0,
-            maxSpeedBase: 25.0,
-            kickForce: 80.0,
-        };
+        // Slider-controlled params. Distances, max speed and kick force are
+        // stored as base values and scaled per-viewport in update().
+        this.params = { ...DEFAULT_PARAMS };
+        this.worldScale = 1.0;
 
-        this.velocityUniforms["separationDistance"] = { value: 20.0 };
-        this.velocityUniforms["alignmentDistance"] = { value: 136.0 };
-        this.velocityUniforms["cohesionDistance"] = { value: 150.0 };
-
-        this.velocityUniforms["audioEnergy"] = { value: 0.0 };
-        this.velocityUniforms["audioBass"] = { value: 0.0 };
-        this.velocityUniforms["audioMids"] = { value: 0.0 };
-        this.velocityUniforms["audioTreble"] = { value: 0.0 };
-
-        this.velocityUniforms["separationForce"] = { value: 25.0 };
-        this.velocityUniforms["alignmentForce"] = { value: 3.5 };
-        this.velocityUniforms["cohesionForce"] = { value: 5.0 };
-        this.velocityUniforms["maxSpeedBase"] = { value: 25.0 };
-        this.velocityUniforms["audioKick"] = { value: 0.0 };
-        this.velocityUniforms["kickForce"] = { value: 80.0 };
-        this.velocityUniforms["worldScale"] = { value: 1.0 };
+        for (const name of ["separationDistance", "alignmentDistance", "cohesionDistance",
+                            "separationForce", "alignmentForce", "cohesionForce",
+                            "maxSpeedBase", "kickForce", "worldScale",
+                            "audioEnergy", "audioBass", "audioMids", "audioTreble", "audioKick"]) {
+            this.velocityUniforms[name] = { value: 0.0 };
+        }
+        this.updateParams(this.params);
 
         this.velocityVariable.wrapS = THREE.RepeatWrapping;
         this.velocityVariable.wrapT = THREE.RepeatWrapping;
@@ -427,11 +425,12 @@ export class PhysicsSubsystem {
         // must stay below the phone-portrait ratio (~0.26) or interaction ranges
         // outgrow the box and the flock collapses into one hovering blob.
         const scale = Math.max(0.2, boundsX / 600.0);
-        this.velocityUniforms["separationDistance"].value = this._baseParams.separationDistance * scale;
-        this.velocityUniforms["alignmentDistance"].value = this._baseParams.alignmentDistance * scale;
-        this.velocityUniforms["cohesionDistance"].value = this._baseParams.cohesionDistance * scale;
-        this.velocityUniforms["maxSpeedBase"].value = this._baseParams.maxSpeedBase * scale;
-        this.velocityUniforms["kickForce"].value = this._baseParams.kickForce * scale;
+        this.worldScale = scale;
+        this.velocityUniforms["separationDistance"].value = this.params.sepDist * scale;
+        this.velocityUniforms["alignmentDistance"].value = this.params.aliDist * scale;
+        this.velocityUniforms["cohesionDistance"].value = this.params.cohDist * scale;
+        this.velocityUniforms["maxSpeedBase"].value = this.params.maxSpeed * scale;
+        this.velocityUniforms["kickForce"].value = this.params.kickForce * scale;
         this.velocityUniforms["worldScale"].value = scale;
 
         this.velocityUniforms["audioEnergy"].value = audioFeatures.energy;
@@ -444,14 +443,37 @@ export class PhysicsSubsystem {
     }
 
     updateParams(params) {
-        if (params.sepDist !== undefined) this._baseParams.separationDistance = params.sepDist;
-        if (params.aliDist !== undefined) this._baseParams.alignmentDistance = params.aliDist;
-        if (params.cohDist !== undefined) this._baseParams.cohesionDistance = params.cohDist;
-        if (params.sepForce !== undefined) this.velocityUniforms["separationForce"].value = params.sepForce;
-        if (params.aliForce !== undefined) this.velocityUniforms["alignmentForce"].value = params.aliForce;
-        if (params.cohForce !== undefined) this.velocityUniforms["cohesionForce"].value = params.cohForce;
-        if (params.maxSpeed !== undefined) this._baseParams.maxSpeedBase = params.maxSpeed;
-        if (params.kickForce !== undefined) this._baseParams.kickForce = params.kickForce;
+        Object.assign(this.params, params);
+        this.velocityUniforms["separationForce"].value = this.params.sepForce;
+        this.velocityUniforms["alignmentForce"].value = this.params.aliForce;
+        this.velocityUniforms["cohesionForce"].value = this.params.cohForce;
+    }
+
+    // Reads positions back from the GPU and estimates how far away the
+    // neighbours found by the shader's sparse search actually are: for a
+    // subset of birds, draw 64 random candidates and take the 7th nearest,
+    // exactly as velocityShader does. Neighbour radii larger than this have
+    // little further effect. Returned in base (unscaled) units, comparable to
+    // the slider values. Costs one 64 KB readback, so call it sparingly.
+    probeNeighborSpacing() {
+        const rt = this.gpuCompute.getCurrentRenderTarget(this.positionVariable);
+        const pos = this._probeBuffer ??= new Float32Array(WIDTH * WIDTH * 4);
+        this.renderer.readRenderTargetPixels(rt, 0, 0, WIDTH, WIDTH, pos);
+
+        const n = WIDTH * WIDTH;
+        const seventh = [];
+        const d = new Float32Array(64);
+        for (let i = 0; i < n; i += 16) {
+            const o = i * 4;
+            for (let s = 0; s < 64; s++) {
+                const q = Math.floor(Math.random() * n) * 4;
+                d[s] = Math.hypot(pos[o] - pos[q], pos[o + 1] - pos[q + 1], pos[o + 2] - pos[q + 2]);
+            }
+            d.sort();
+            seventh.push(d[6]);
+        }
+        seventh.sort((a, b) => a - b);
+        return seventh[seventh.length >> 1] / this.worldScale;
     }
 
     getPositionTexture() {

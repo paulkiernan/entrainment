@@ -2,18 +2,29 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 
+// Dusk sky, top to bottom. Must match --sky-* in style.css: the CSS gradient
+// is the visible background, and distant birds fade into the same colour.
+const SKY = { zenith: '#8e9aad', mid: '#c9c7cb', horizon: '#e9c9a8', midStop: 0.6 };
+const INK = '#1c1a22';
+
+// Raw sRGB triplet (bypasses THREE colour management, matching CSS exactly)
+const rgb = (hex) => new THREE.Vector3(
+  parseInt(hex.slice(1, 3), 16) / 255,
+  parseInt(hex.slice(3, 5), 16) / 255,
+  parseInt(hex.slice(5, 7), 16) / 255,
+);
+
 export class RenderingSubsystem {
   constructor(canvas) {
-    this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xf5f5f0);
-    this.scene.fog = new THREE.FogExp2(0xf5f5f0, 0.0004); // Very subtle fog — birds always visible
+    this.scene = new THREE.Scene(); // no background: the CSS sky shows through
 
     const aspect = window.innerWidth / window.innerHeight;
     const fov = aspect < 1 ? 80 : 60;
     this.camera = new THREE.PerspectiveCamera(fov, aspect, 1, 3000);
     this.camera.position.z = 600;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    this.renderer.setClearColor(0x000000, 0);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
 
@@ -60,7 +71,13 @@ export class RenderingSubsystem {
             texturePosition: { value: null },
             textureVelocity: { value: null },
             audioEnergy: { value: 0.0 },
-            kick: { value: 0.0 }
+            kick: { value: 0.0 },
+            viewportHeight: { value: window.innerHeight * this.renderer.getPixelRatio() },
+            skyZenith: { value: rgb(SKY.zenith) },
+            skyMid: { value: rgb(SKY.mid) },
+            skyHorizon: { value: rgb(SKY.horizon) },
+            skyMidStop: { value: SKY.midStop },
+            ink: { value: rgb(INK) }
         },
         vertexShader: `
             uniform sampler2D texturePosition;
@@ -115,12 +132,27 @@ export class RenderingSubsystem {
             varying float vShade;
             varying float vDepth;
             uniform float kick;
-            
+            uniform float viewportHeight;
+            uniform vec3 skyZenith;
+            uniform vec3 skyMid;
+            uniform vec3 skyHorizon;
+            uniform float skyMidStop;
+            uniform vec3 ink;
+
             void main() {
-                float finalShade = mix(vShade, 0.75, vDepth * vDepth);
-                // Kick pulse: subtle darken on kick hits
-                finalShade *= (1.0 - kick * 0.3);
-                gl_FragColor = vec4(vec3(finalShade), 1.0);
+                // Sky colour directly behind this fragment (same gradient as the CSS)
+                float t = 1.0 - gl_FragCoord.y / viewportHeight;
+                vec3 sky = t < skyMidStop
+                    ? mix(skyZenith, skyMid, t / skyMidStop)
+                    : mix(skyMid, skyHorizon, (t - skyMidStop) / (1.0 - skyMidStop));
+
+                // Silhouette: near-black ink, a touch lighter on top-lit wings
+                vec3 bird = ink + vec3(vShade * 0.35);
+
+                // Atmospheric perspective: far birds dissolve toward the sky.
+                // Kicks pull the whole flock forward into sharper contrast.
+                float haze = vDepth * vDepth * 0.72 * (1.0 - kick * 0.6);
+                gl_FragColor = vec4(mix(bird, sky, haze), 1.0);
             }
         `,
         transparent: true,
@@ -160,5 +192,6 @@ export class RenderingSubsystem {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.composer.setSize(window.innerWidth, window.innerHeight);
+    this.material.uniforms.viewportHeight.value = window.innerHeight * this.renderer.getPixelRatio();
   }
 }
