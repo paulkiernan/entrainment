@@ -68,6 +68,12 @@ const signalRows = [];
 const sliderRows = [];
 let probeLabel = null;
 
+// Product analytics. The host page (paulynomial.com) loads PostHog; standalone
+// and in local dev there is no window.posthog, so this is a no-op.
+function track(event, properties) {
+  window.posthog?.capture?.(event, properties);
+}
+
 function init() {
   const canvas = document.getElementById('canvas');
 
@@ -109,6 +115,7 @@ function init() {
       isDevMode = true;
       sizeDevCanvases();
     }
+    track(name === 'dev' ? 'dev_panel_opened' : 'about_opened');
   }
 
   devBtn.addEventListener('click', (e) => {
@@ -149,10 +156,12 @@ function init() {
       streamStarted = true;
       startNowPlaying();
       muteBtn.classList.remove('idle');
+      track('radio_started');
     } else {
       const el = audioSystem.audioElement;
       if (!el) return;
       el.muted = !el.muted;
+      track(el.muted ? 'radio_muted' : 'radio_unmuted');
     }
     const muted = audioSystem.audioElement?.muted;
     muteBtn.classList.toggle('muted', !!muted);
@@ -223,6 +232,10 @@ function buildDevPanel() {
       physicsSystem.updateParams({ [s.param]: parseFloat(input.value) });
       syncSlider(row);
     });
+    // 'change' fires once on release, not on every drag step
+    input.addEventListener('change', () => {
+      track('slider_changed', { param: s.param, value: parseFloat(input.value), default: def });
+    });
 
     slidersEl.append(label, input, output);
     sliderRows.push(row);
@@ -235,6 +248,7 @@ function buildDevPanel() {
       row.input.value = DEFAULT_PARAMS[row.param];
       syncSlider(row);
     }
+    track('sliders_reset');
   });
 }
 
